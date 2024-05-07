@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:os="http://www.mulesoft.org/schema/mule/os" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+	xmlns:batch="http://www.mulesoft.org/schema/mule/batch" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+	<configuration-properties doc:name="Configuration properties" doc:id="3f81ef91-4a7a-45c5-9d94-57a5bbf2d639" file="common.properties" />
+	<flow name="mainFlow" doc:id="f59a89ac-9740-4810-a97e-0db5f311d776" >
+		<flow-ref doc:name="Flow Reference" doc:id="c7cd047e-c333-408b-b10a-3af26d6175b0" name="batchexchangeFlow"/>
+		<error-handler >
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="ac6e3080-3f22-440d-820a-ad9647a4a33a" type="ANY">
+				<flow-ref doc:name="Flow Reference" doc:id="b59f7979-9f2e-47af-8bd5-ecd476073f96" name="errorHandlingFlow"/>
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+	<flow name="batchexchangeFlow" doc:id="4c381dbc-8f36-44cd-bce2-2dc92e4b1697" >
+		<choice doc:name="Choice" doc:id="dbf096d9-fc95-4bd3-a590-a0f4296a8bae">
+			<when expression="sizeOf(payload) &gt; 0">
+				<batch:job jobName="payment-broadcastBatch_Job1" doc:id="95be8533-2f56-464d-9998-8b3bc6ab6d73" blockSize="200">
+			<batch:process-records>
+				<batch:step name="upsertInSalesforceStep" doc:id="6fb9ff3f-bb1e-45fd-8198-d62e96310669">
+					<choice doc:name="Choice" doc:id="48f3026f-e99f-4e22-9c16-1a82dcda1af1">
+						<when expression="vars.OppId[payload.OpportunityName__c]  != null">
+							<ee:transform doc:name="Add Opportunity Id to payload" doc:id="23a7a897-9a0c-499f-af97-eb6890ef131f">
+								<ee:message>
+									<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload ++ OpportunityId: vars.OppId[payload.OpportunityName__c]]]></ee:set-payload>
+								</ee:message>
+							</ee:transform>
+						</when>
+						<otherwise>
+							<logger level="INFO" doc:name="Didn't Find Opportunity" doc:id="c9364572-a305-4e94-8de8-d8d25576d08a" message="Didn't find opportunity by name #[payload.OpportunityName__c]" />
+						</otherwise>
+					</choice>
+					<batch:aggregator doc:name="Batch Aggregator" doc:id="d2c8a90d-9af1-4d15-92d6-c08fd4953b80" size="100">
+						<ee:transform doc:name="Prepare Payments for Upsert (add opp.id)" doc:id="91bc611c-460d-4dc1-abb1-e41ae8c634b9">
+							<ee:message>
+								<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload map ((item) -> {
+	Name: item.Name,
+	OpportunityName__c: item.OpportunityName__c,
+	FirstName__c: item.FirstName__c,
+	LastName__c: item.LastName__c,
+	Amount__c: item.Amount__c,
+	Opportunity__c: item.OpportunityId
+})]]></ee:set-payload>
+							</ee:message>
+						</ee:transform>
+						<ee:transform doc:name="Filter empty opp" doc:id="f5d45a1b-bab9-4962-b0b6-ce2722f505a3">
+							<ee:message>
+								<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload filter ($.Opportunity__c != null)]]></ee:set-payload>
+							</ee:message>
+						</ee:transform>
+						<logger level="INFO" doc:name="Log records to upsert" doc:id="156388e7-7b8d-40af-bc5c-de01946bddb5" message="#[write(payload, 'application/json')]" />
+						<salesforce:upsert objectType="Payment__c" externalIdFieldName="Name" doc:name="Upsert Payments in Salesforce Receiver" doc:id="a7f1ab1e-b39e-4d0f-aa32-8ec703748ec4" config-ref="Salesforce_Receiver_Config">
+						</salesforce:upsert>
+						<logger level="INFO" doc:name="Log Salesforce response" doc:id="ed877f64-fad2-4b98-abf0-64cc9ad5229e" message="#[write(payload, 'application/json')]" />
+					</batch:aggregator>
+				</batch:step>
+			</batch:process-records>
+			<batch:on-complete>
+				<logger level="INFO" doc:name="Broadcast process has finished!" doc:id="5dfde4c4-37cc-45b6-9b5e-b9ed59514a7e" message="Broadcast process has finished!" />
+			</batch:on-complete>
+		</batch:job>
+				<choice doc:name="Choice" doc:id="26b6aa2c-6907-4a82-8f16-5fdbe1b4011a">
+			<when expression="sizeOf(payload) == 0 or payload.result.failedRecords == 0">
+				<os:store doc:name="Store lastQueryTimestamp" doc:id="6e0eb352-3b28-403a-9881-e68504d4d8c8" key="exchangeDate" objectStore="exchangeStore">
+					<os:value><![CDATA[#[vars.CurrentExchangeDate]]]></os:value>
+				</os:store>
+			</when>
+			<otherwise>
+				<logger level="INFO" doc:name="Logger Date Was Not Updated" doc:id="35af7bda-ae2d-4337-874b-6da78f0ac736" message="Date is not updated, becouse response of receiver was bad" />
+			</otherwise>
+		</choice>
+			</when>
+			<otherwise >
+				<ee:transform doc:name="Transform Message" doc:id="05b3697a-d842-4d52-9e41-dbdbbc9e9646" >
+					<ee:message >
+						<ee:set-payload ><![CDATA[%dw 2.0
+output application/java
+---
+[]]]></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+			</otherwise>
+		</choice>
+	</flow>
+</mule>

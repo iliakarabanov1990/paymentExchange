@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:os="http://www.mulesoft.org/schema/mule/os" 
+	xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce" xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+	http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+	http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+	
+	<salesforce:sfdc-config name="Salesforce_Sender_Config" doc:name="Salesforce Config" doc:id="84c1dc82-bd58-4955-a631-021b9d4cf235" >
+		<salesforce:basic-connection username="${org_sender.username}" password="${org_sender.password}" securityToken="${org_sender.security_token}" />
+	</salesforce:sfdc-config>
+	<salesforce:sfdc-config name="Salesforce_Receiver_Config" doc:name="Salesforce Config" doc:id="5aca540c-d168-4b0f-9888-709e1bcc2509" >
+		<salesforce:basic-connection username="${org_receiver.username}" password="${org_receiver.password}" securityToken="${org_receiver.security_token}" />
+	</salesforce:sfdc-config>
+	
+	<os:object-store name="exchangeStore" doc:name="Object store" doc:id="157d4b95-fd91-49b7-8997-4817e81c4d57" entryTtlUnit="MILLISECONDS" expirationIntervalUnit="MILLISECONDS"/>
+	<flow name="schedulerFlow" doc:id="b3e5df14-dc77-4152-8b56-af4b9bcfd583" >
+		<scheduler doc:name="Trigger sync" doc:id="9a071c1d-4a41-4239-9b11-c1b06623d3af">
+			<scheduling-strategy>
+				<fixed-frequency frequency="${scheduler.frequency}"
+					startDelay="${scheduler.startDelay}" />
+			</scheduling-strategy>
+		</scheduler>
+		<flow-ref doc:name="Exchange Date Flow" doc:id="ad555f96-4c99-4012-b438-b2b3212d9005" name="exchangeDateFlow"/>
+		<flow-ref doc:name="mainFlow" doc:id="8c9d58d1-53fb-45e6-b0a6-cb3d4e2d23d2" name="mainFlow"/>
+	</flow>
+	<flow name="exchangeDateFlow">
+		<os:retrieve doc:id="5e9fcfbc-4608-4f81-aa09-402af368a4d5" key="exchangeDate" objectStore="exchangeStore" target="lastExchangeDate" doc:name="Retrieve lastQueryTimestamp">
+			<os:default-value ><![CDATA[#[read(p('exchangeDate'))]]]></os:default-value>
+		</os:retrieve>
+		<ee:transform doc:name="Transform Message" doc:id="445c72c9-5e08-4947-8c29-759d37c253ad" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/java
+---
+
+{
+	date: vars.lastExchangeDate as String as DateTime
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<salesforce:query config-ref="Salesforce_Sender_Config"
+			doc:name="Query Payments From Sender">
+			<salesforce:salesforce-query><![CDATA[SELECT 	
+	Name, OpportunityName__c, FirstName__c, LastName__c, Amount__c, LastModifiedDate FROM Payment__c 
+WHERE
+	LastModifiedDate > :lastModifiedDate]]></salesforce:salesforce-query>
+			<salesforce:parameters><![CDATA[#[output application/java
+---
+{
+	"lastModifiedDate"  : payload.date
+}]]]></salesforce:parameters>
+		</salesforce:query>
+		<set-variable value="#[max(payload map $.LastModifiedDate)]" doc:name="Current exchange date" doc:id="671091b2-1963-4fd9-bc25-2cb73628d23a" variableName="CurrentExchangeDate" />
+		<logger level="INFO" doc:name="Logger" doc:id="e29762ea-056a-4e3f-8296-e524af9e2c73" message="current exchange date #[vars.lastExchangeDate]" />
+		<choice doc:name="Choice" doc:id="9d8458de-50bd-4b9e-8f7a-4ab4386da7b6">
+			<when expression="sizeOf(payload) &gt; 0">
+				<set-variable value="#[&quot;('&quot; ++ ((payload map $.OpportunityName__c as String) joinBy (&quot;', '&quot;)) ++ &quot;')&quot;]" doc:name="Array of Opportunities Name" doc:id="da5cff56-7b08-4b52-bb83-dc83ba0c7d63" variableName="ArrOppName" />
+				<salesforce:query doc:name="Opportunity Query FROM Receiver" doc:id="4a2d01c2-bb4e-417e-8c53-a08788f5cc31" config-ref="Salesforce_Receiver_Config" target="OppId">
+			<repeatable-in-memory-iterable />
+			<salesforce:salesforce-query><![CDATA[SELECT Id, Name FROM Opportunity WHERE Name IN :OpportunityName]]></salesforce:salesforce-query>
+			<salesforce:parameters><![CDATA[#[output application/java
+---
+{
+	"OpportunityName" : vars.ArrOppName
+}]]]></salesforce:parameters>
+		</salesforce:query>
+				<set-variable value="#[%dw 2.0&#10;output application/json&#10;---&#10;vars.OppId reduce ((env, obj={}) -&gt; obj ++ {&#10;    (env.Name): env.Id&#10;})]" doc:name="Set Map&lt;Name, id&gt; In OppId " doc:id="e08a9abd-77a4-4efa-aaf6-212cf39fe8f0" variableName="OppId" />
+			</when>
+			<otherwise >
+				<logger level="INFO" doc:name="Logger" doc:id="47ebd91b-a975-45c6-b380-bd0d2d2b8506" message="There are nothing to exchange" />
+			</otherwise>
+		</choice>
+	
+</flow>
+
+</mule>
